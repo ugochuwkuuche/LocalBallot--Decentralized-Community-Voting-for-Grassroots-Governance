@@ -428,3 +428,110 @@
         (ok true)
     )
 )
+
+(define-constant ERR-TIMELOCK-ACTIVE (err u400))
+(define-constant ERR-TIMELOCK-NOT-READY (err u401))
+(define-constant ERR-EXECUTION-FAILED (err u402))
+(define-constant ERR-PROPOSAL-NOT-PASSED (err u403))
+
+(define-data-var timelock-delay uint u144)
+
+(define-map TimeLocks
+    uint
+    {
+        proposal-id: uint,
+        execution-block: uint,
+        executed: bool,
+        cancelled: bool,
+    }
+)
+
+(define-map ExecutionQueue
+    uint
+    uint
+)
+
+(define-data-var queue-count uint u0)
+
+(define-private (get-proposal-status (proposal-id uint))
+    (match (map-get? Proposals proposal-id)
+        proposal (get status proposal)
+        "not-found"
+    )
+)
+
+(define-public (queue-execution (proposal-id uint))
+    (let (
+            (proposal (unwrap! (map-get? Proposals proposal-id) ERR-PROPOSAL-NOT-FOUND))
+            (current-block burn-block-height)
+            (execution-block (+ current-block (var-get timelock-delay)))
+            (queue-id (+ (var-get queue-count) u1))
+        )
+        (asserts! (is-eq (get status proposal) "passed") ERR-PROPOSAL-NOT-PASSED)
+        (asserts! (is-none (map-get? TimeLocks proposal-id)) ERR-TIMELOCK-ACTIVE)
+        (map-set TimeLocks proposal-id {
+            proposal-id: proposal-id,
+            execution-block: execution-block,
+            executed: false,
+            cancelled: false,
+        })
+        (map-set ExecutionQueue queue-id proposal-id)
+        (var-set queue-count queue-id)
+        (ok execution-block)
+    )
+)
+
+(define-public (execute-proposal (proposal-id uint))
+    (let (
+            (timelock (unwrap! (map-get? TimeLocks proposal-id) ERR-TIMELOCK-NOT-READY))
+            (current-block burn-block-height)
+        )
+        (asserts! (>= current-block (get execution-block timelock))
+            ERR-TIMELOCK-NOT-READY
+        )
+        (asserts! (not (get executed timelock)) ERR-EXECUTION-FAILED)
+        (asserts! (not (get cancelled timelock)) ERR-EXECUTION-FAILED)
+        (map-set TimeLocks proposal-id (merge timelock { executed: true }))
+        (ok true)
+    )
+)
+
+(define-public (cancel-execution (proposal-id uint))
+    (let ((timelock (unwrap! (map-get? TimeLocks proposal-id) ERR-TIMELOCK-NOT-READY)))
+        (asserts! (is-eq tx-sender (var-get admin)) ERR-NOT-AUTHORIZED)
+        (asserts! (not (get executed timelock)) ERR-EXECUTION-FAILED)
+        (map-set TimeLocks proposal-id (merge timelock { cancelled: true }))
+        (ok true)
+    )
+)
+
+(define-public (update-timelock-delay (new-delay uint))
+    (begin
+        (asserts! (is-eq tx-sender (var-get admin)) ERR-NOT-AUTHORIZED)
+        (var-set timelock-delay new-delay)
+        (ok true)
+    )
+)
+
+(define-read-only (get-timelock (proposal-id uint))
+    (map-get? TimeLocks proposal-id)
+)
+
+(define-read-only (get-timelock-delay)
+    (var-get timelock-delay)
+)
+
+(define-read-only (get-execution-queue-size)
+    (var-get queue-count)
+)
+
+(define-read-only (is-execution-ready (proposal-id uint))
+    (match (map-get? TimeLocks proposal-id)
+        timelock (and
+            (>= burn-block-height (get execution-block timelock))
+            (not (get executed timelock))
+            (not (get cancelled timelock))
+        )
+        false
+    )
+)
